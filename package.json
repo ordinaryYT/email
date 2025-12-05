@@ -1,0 +1,19 @@
+{
+  "name": "outlook-to-discord",
+  "version": "1.0.0",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@microsoft/microsoft-graph-client": "^3.0.7",
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "isomorphic-fetch": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.x"
+  }
+}
