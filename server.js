@@ -1,72 +1,64 @@
 import express from "express";
-import { Client } from "discord.js";
+import { Client, GatewayIntentBits } from "discord.js";
 import dotenv from "dotenv";
-import fetch from "node-fetch";
-
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-
 app.use(express.json({ limit: "10mb" }));
 
-// --- DISCORD BOT ---
-const bot = new Client({ intents: [] });
+const PORT = process.env.PORT || 3000;
 
-const CHANNEL_MAP = {
-  1: process.env.CHANNEL_1,
-  2: process.env.CHANNEL_2,
-  3: process.env.CHANNEL_3,
-  4: process.env.CHANNEL_4
-};
+// Discord Bot
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] });
 
-bot.once("ready", () => {
-  console.log("Discord bot online:", bot.user.tag);
+client.once("ready", () => {
+  console.log(`Bot logged in as ${client.user.tag}`);
 });
 
-bot.login(process.env.DISCORD_TOKEN);
+client.login(process.env.DISCORD_TOKEN);
 
-// --- MAIN INBOUND EMAIL ENDPOINT ---
-app.post("/inbound-email", async (req, res) => {
+// Mapping inbox to channel
+const inboxToChannel = {
+  inbox1: process.env.CHANNEL_1,
+  inbox2: process.env.CHANNEL_2,
+  inbox3: process.env.CHANNEL_3,
+  inbox4: process.env.CHANNEL_4,
+};
+
+// Deliverhook → Discord Endpoint
+app.post("/inbound-email/:inbox", async (req, res) => {
+  const inbox = req.params.inbox;
+  const channelId = inboxToChannel[inbox];
+
+  if (!channelId) return res.status(400).send("Unknown inbox");
+
+  const { from, subject, text, html } = req.body;
+  const content = text || html || "(no content)";
+
   try {
-    const inbox = req.query.inbox;
-    const channelId = CHANNEL_MAP[inbox];
-
-    if (!channelId) {
-      return res.status(400).send("Invalid inbox number");
-    }
-
-    const channel = await bot.channels.fetch(channelId);
-
-    if (!channel || !channel.isTextBased()) {
-      return res.status(400).send("Invalid channel");
-    }
-
-    const { from, subject, text, html } = req.body;
-    const content = text || html || "(no content)";
+    const channel = await client.channels.fetch(channelId);
 
     await channel.send({
-      embeds: [
-        {
-          title: subject || "(no subject)",
-          description: content.slice(0, 1800),
-          color: 0x0078d7,
-          author: {
-            name: from?.address || from?.name || "Unknown"
-          },
-          footer: {
-            text: `Inbox ${inbox}`
-          },
-          timestamp: new Date()
-        }
-      ]
+      embeds: [{
+        title: subject || "(no subject)",
+        description: content.slice(0, 1900),
+        color: 0x0078D7,
+        author: { name: from?.text || from?.address || "Unknown Sender" },
+        timestamp: new Date()
+      }]
     });
 
+    console.log(`Delivered email → ${inbox}`);
     res.send("OK");
   } catch (err) {
-    console.error("Error:", err);
-    res.status(500).send("Failed");
+    console.error(err);
+    res.status(500).send("Discord error");
   }
 });
 
-app.listen(PORT, () => console.log("Server running on port", PORT));
+// Home page
+app.get("/", (req, res) => {
+  res.send("Outlook → Deliverhook → Discord Bot is running!");
+});
+
+app.listen(PORT, () => console.log("Server running on port " + PORT));
