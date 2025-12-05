@@ -3,81 +3,68 @@ import { Client } from 'discord.js';
 import imaps from 'imap-simple';
 import { simpleParser } from 'mailparser';
 import dotenv from 'dotenv';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 
 dotenv.config();
+
+// Fix __dirname in ESM
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Serve index.html for Render
 app.get('/', (req, res) => {
-  res.sendFile(__dirname + '/index.html');
+  res.sendFile(join(__dirname, 'index.html'));
 });
 
-app.listen(PORT, () => console.log(`Web server listening on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Web server running on port ${PORT}`);
+});
 
-// ====================== CONFIG ======================
+// ==================== DISCORD ====================
 const discordClient = new Client({ intents: [] });
 
-const accounts = [
-  {
-    name: "Inbox 1",
-    channelId: process.env.CHANNEL_1,
-    email: process.env.EMAIL_1,
-    password: process.env.PASSWORD_1,
-  },
-  {
-    name: "Inbox 2",
-    channelId: process.env.CHANNEL_2,
-    email: process.env.EMAIL_2,
-    password: process.env.PASSWORD_2,
-  },
-  {
-    name: "Inbox 3",
-    channelId: process.env.CHANNEL_3,
-    email: process.env.EMAIL_3,
-    password: process.env.PASSWORD_3,
-  },
-  {
-    name: "Inbox 4",
-    channelId: process.env.CHANNEL_4,
-    email: process.env.EMAIL_4,
-    password: process.env.PASSWORD_4,
-  },
-];
-
-// Store the last seen UID for each account (prevents duplicates)
-const lastSeenUid = {};
-
-// ====================== DISCORD READY ======================
 discordClient.once('ready', () => {
-  console.log(`Discord bot online as ${discordClient.user.tag}`);
-  startPollingAllAccounts();
+  console.log(`Discord bot ready as ${discordClient.user.tag}`);
+  startPolling();
 });
 
 discordClient.login(process.env.DISCORD_TOKEN);
 
-// ====================== POLLING FUNCTION ======================
-async function checkMailbox(account) {
-  const config = {
+// ==================== ACCOUNTS ====================
+const accounts = [
+  { name: "Inbox 1", email: process.env.EMAIL_1, password: process.env.PASSWORD_1, channel: process.env.CHANNEL_1 },
+  { name: "Inbox 2", email: process.env.EMAIL_2, password: process.env.PASSWORD_2, channel: process.env.CHANNEL_2 },
+  { name: "Inbox 3", email: process.env.EMAIL_3, password: process.env.PASSWORD_3, channel: process.env.CHANNEL_3 },
+  { name: "Inbox 4", email: process.env.EMAIL_4, password: process.env.PASSWORD_4, channel: process.env.CHANNEL_4 },
+].filter(acc => acc.email && acc.password && acc.channel);
+
+// Store last seen UID per email
+const lastUid = {};
+
+// ==================== POLLING ====================
+async function checkMail(account) {
+  const imapConfig = {
     imap: {
       user: account.email,
       password: account.password,
       host: 'outlook.office365.com',
       port: 993,
       tls: true,
-      authTimeout: 10000,
-      tlsOptions: { servername: 'outlook.office365.com' }
+      tlsOptions: { rejectUnauthorized: false, servername: 'outlook.office365.com' },
+      authTimeout: 30000,
     }
   };
 
   let connection;
   try {
-    connection = await imaps.connect({ imap: config.imap });
-    await connection.openBox('INBOX');
+    connection = await imaps.connect({ imap: imapConfig.imap });
+    const box = await connection.openBox('INBOX', true); // readonly = false
 
-    // Search for unseen messages OR all messages newer than last seen UID
-    const since = lastSeenUid[account.email] || '1';
-    const searchCriteria = ['UNSEEN', ['UID', `${since}:*`]];
+    const searchCriteria = ['UNSEEN'];
     const fetchOptions = { bodies: [''], struct: true };
 
     const messages = await connection.search(searchCriteria, fetchOptions);
@@ -87,67 +74,60 @@ async function checkMailbox(account) {
       return;
     }
 
-    // Process messages from oldest to newest
-    for (const message of messages) {
-      const uid = message.attributes.uid;
-      const part = message.parts.find(p => p.which === '');
-      const rawEmail = part.body;
+    for (const msg of messages) {
+      const uid = msg.attributes.uid;
+      if (lastUid[account.email] && uid <= lastUid[account.email]) continue;
 
-      const parsed = await simpleParser(rawEmail);
+      const part = msg.parts.find(p => p.which === '');
+      const parsed = await simpleParser(part.body);
 
-      const sender = parsed.from?.text || 'Unknown Sender';
-      const subject = parsed.subject || '(no subject)';
-      const body = parsed.text || parsed.html || '(no body)';
-      const preview = body.replace(/\s+/g, ' ').trim().slice(0, 500);
-      const time = parsed.date ? parsed.date.toLocaleString() : new Date().toLocaleString();
+      const from = parsed.from?.text || 'Unknown';
+      subject = parsed.subject || '(no subject)';
+      preview = (parsed.text || parsed.html || '').replace(/\s+/g, ' ').trim().slice(0, 800);
 
-      // Send to Discord
       try {
-        const channel = await discordClient.channels.fetch(account.channelId);
+        const channel = await discordClient.channels.fetch(account.channel);
         if (channel?.isTextBased()) {
           await channel.send({
             embeds: [{
               title: subject.length > 250 ? subject.slice(0, 247) + '...' : subject,
-              description: preview || '_Empty email_',
+              description: preview || '_No content_',
               color: 0x0078D7,
-              author: { name: sender },
-              footer: { text: `${account.name} • ${time}` },
+              author: { name: from },
+              footer: { text: `${account.name} • ${new Date().toLocaleString()}` },
               timestamp: new Date(),
             }]
           });
-          console.log(`Sent email from ${sender} to ${account.name}`);
+          console.log(`Sent: "${subject}" → ${account.name}`);
         }
-      } catch (err) {
-        console.error(`Failed to send to Discord (${account.name}):`, err.message);
+      } catch (e) {
+        console.error(`Discord error (${account.name}):`, e.message);
       }
 
-      // Update last seen UID
-      if (uid > (lastSeenUid[account.email] || 0)) {
-        lastSeenUid[account.email] = uid;
-      }
+      lastUid[account.email] = Math.max(lastUid[account.email] || 0, uid);
     }
 
   } catch (err) {
-    console.error(`IMAP Error – ${account.name} (${account.email}):`, err.message);
+    console.error(`IMAP FAILED – ${account.name} (${account.email}):`, err.message);
   } finally {
     if (connection) connection.end();
   }
 }
 
-// ====================== START POLLING ======================
-function startPollingAllAccounts() {
-  accounts.forEach(account => {
-    if (!account.channelId || !account.email || !account.password) {
-      console.warn(`Skipping ${account.name} – missing config`);
-      return;
-    }
+// ==================== START ====================
+function startPolling() {
+  if (accounts.length === 0) {
+    console.error("No accounts configured! Check your .env");
+    return;
+  }
 
-    // First check immediately
-    checkMailbox(account);
+  accounts.forEach(acc => {
+    console.log(`Started polling ${acc.email} → channel ${acc.channel}`);
+
+    // First run immediately
+    checkMail(acc);
 
     // Then every 60 seconds
-    setInterval(() => checkMailbox(account), 60_000);
-
-    console.log(`Polling started → ${account.email} → Discord #${account.channelId}`);
+    setInterval(() => checkMail(acc), 60_000);
   });
 }
